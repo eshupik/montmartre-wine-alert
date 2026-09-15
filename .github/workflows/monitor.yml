@@ -1,0 +1,88 @@
+name: Montmartre Wine Alert
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check booking page
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python - <<'PY'
+          import urllib.request
+          import urllib.parse
+          import os
+          import re
+
+          URL = "https://fetedesvendangesdemontmartre.com/evenement/les-visites-des-vignes/"
+
+          req = urllib.request.Request(
+              URL,
+              headers={"User-Agent": "Mozilla/5.0"}
+          )
+
+          html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", errors="ignore")
+
+          # Приводим HTML к удобному для поиска виду
+          text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
+          text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+          text = re.sub(r"<[^>]+>", " ", text)
+          text = re.sub(r"\s+", " ", text).strip()
+
+          # Признак полностью закрытого бронирования
+          complete = "Cet événement est complet" in text
+
+          # Ищем признаки доступной формы / créneau
+          booking_words = [
+              "Créneau",
+              "créneau",
+              "S'inscrire",
+              "Inscription"
+          ]
+
+          booking_open = any(word in text for word in booking_words)
+
+          print("Page downloaded successfully")
+          print("Complete:", complete)
+          print("Booking indicators:", booking_open)
+
+          if complete:
+              print("No availability.")
+              raise SystemExit(0)
+
+          if not booking_open:
+              print("Booking status unclear.")
+              raise SystemExit(0)
+
+          # Если страница больше не показывает статус COMPLET,
+          # отправляем Telegram alert.
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = "434528727"
+
+          message = (
+              "🚨 MONTMARTRE WINE ALERT 🚨\n\n"
+              "Возможно, появились места для Visites des Vignes!\n\n"
+              "Открой бронирование сейчас:\n"
+              + URL
+          )
+
+          data = urllib.parse.urlencode({
+              "chat_id": chat_id,
+              "text": message
+          }).encode()
+
+          tg_url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+          urllib.request.urlopen(
+              urllib.request.Request(tg_url, data=data),
+              timeout=30
+          )
+
+          print("Telegram alert sent!")
+          PY
