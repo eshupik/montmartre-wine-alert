@@ -5,84 +5,128 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check booking page
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Check booking availability
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           python - <<'PY'
-          import urllib.request
-          import urllib.parse
           import os
           import re
+          import urllib.request
+          import urllib.parse
+          from pathlib import Path
 
           URL = "https://fetedesvendangesdemontmartre.com/evenement/les-visites-des-vignes/"
+          STATE_FILE = Path("availability_state.txt")
 
-          req = urllib.request.Request(
+          # Download page
+          request = urllib.request.Request(
               URL,
               headers={"User-Agent": "Mozilla/5.0"}
           )
 
-          html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", errors="ignore")
+          html = urllib.request.urlopen(request, timeout=30).read().decode(
+              "utf-8", errors="ignore"
+          )
 
-          # Приводим HTML к удобному для поиска виду
-          text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
-          text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+          # Remove scripts/styles and HTML tags
+          text = re.sub(
+              r"<script.*?</script>",
+              " ",
+              html,
+              flags=re.S | re.I
+          )
+          text = re.sub(
+              r"<style.*?</style>",
+              " ",
+              text,
+              flags=re.S | re.I
+          )
           text = re.sub(r"<[^>]+>", " ", text)
           text = re.sub(r"\s+", " ", text).strip()
 
-          # Признак полностью закрытого бронирования
+          # Current page status
           complete = "Cet événement est complet" in text
+          closed = "Inscriptions fermées" in text
 
-          # Ищем признаки доступной формы / créneau
-          booking_words = [
-              "Créneau",
-              "créneau",
-              "S'inscrire",
-              "Inscription"
-          ]
-
-          booking_open = any(word in text for word in booking_words)
+          available = not complete and not closed
 
           print("Page downloaded successfully")
           print("Complete:", complete)
-          print("Booking indicators:", booking_open)
+          print("Registrations closed:", closed)
+          print("Availability:", available)
 
-          if complete:
-              print("No availability.")
-              raise SystemExit(0)
+          # Previous state
+          previous = "unknown"
 
-          if not booking_open:
-              print("Booking status unclear.")
-              raise SystemExit(0)
+          if STATE_FILE.exists():
+              previous = STATE_FILE.read_text().strip()
 
-          # Если страница больше не показывает статус COMPLET,
-          # отправляем Telegram alert.
-          token = os.environ["TELEGRAM_BOT_TOKEN"]
-          chat_id = "434528727"
+          current = "available" if available else "full"
 
-          message = (
-              "🚨 MONTMARTRE WINE ALERT 🚨\n\n"
-              "Возможно, появились места для Visites des Vignes!\n\n"
-              "Открой бронирование сейчас:\n"
-              + URL
-          )
+          print("Previous state:", previous)
+          print("Current state:", current)
 
-          data = urllib.parse.urlencode({
-              "chat_id": chat_id,
-              "text": message
-          }).encode()
+          # Save current state
+          STATE_FILE.write_text(current)
 
-          tg_url = f"https://api.telegram.org/bot{token}/sendMessage"
+          # Only notify when state changes from FULL -> AVAILABLE
+          if current == "available" and previous != "available":
 
-          urllib.request.urlopen(
-              urllib.request.Request(tg_url, data=data),
-              timeout=30
-          )
+              token = os.environ["TELEGRAM_BOT_TOKEN"]
+              chat_id = "434528727"
 
-          print("Telegram alert sent!")
+              message = (
+                  "🚨🚨 MONTMARTRE WINE ALERT 🚨🚨\n\n"
+                  "ВНИМАНИЕ: похоже, появились места "
+                  "на Visites des vignes!\n\n"
+                  "Проверь бронирование прямо сейчас:\n"
+                  + URL
+              )
+
+              data = urllib.parse.urlencode({
+                  "chat_id": chat_id,
+                  "text": message
+              }).encode()
+
+              telegram_url = (
+                  f"https://api.telegram.org/bot{token}/sendMessage"
+              )
+
+              request = urllib.request.Request(
+                  telegram_url,
+                  data=data,
+                  method="POST"
+              )
+
+              urllib.request.urlopen(request, timeout=30)
+
+              print("🚨 Telegram alert sent!")
+
+          else:
+              print("No new availability alert.")
+
           PY
+
+      - name: Save state
+        run: |
+          git config user.name "Montmartre Wine Alert"
+          git config user.email "actions@github.com"
+
+          git add availability_state.txt
+
+          git diff --cached --quiet || \
+            git commit -m "Update availability state"
+
+          git push
